@@ -79,9 +79,10 @@ def put_chinese_text(img, text, position, text_color=(0, 255, 0), font_size=30):
 def main():
     cap = cv2.VideoCapture(SystemConfig.CAMERA_ID)
     detector = TopDownPoseDetector()
-    
-    cv2.namedWindow("Smart Fitness Mirror", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Smart Fitness Mirror", 1280, 720)
+
+    # 改用無邊框全螢幕模式，撐滿螢幕最大長寬
+    cv2.namedWindow("Smart Fitness Mirror", cv2.WND_PROP_FULLSCREEN)
+    cv2.setWindowProperty("Smart Fitness Mirror", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     
     ai_pipeline = VLMPipeline()
     threading.Thread(target=ai_pipeline.worker_loop, daemon=True).start()
@@ -98,6 +99,7 @@ def main():
     ai_is_processing = False
     ai_advice_text = ""
     ai_advice_expiry = 0
+    prev_frame_time = time.time()   # 新增：FPS 計時起點
     
     # 保留預設 feedback，防止沒有偵測到骨架時發生 UnboundLocalError
     feedback = FeedbackState("等待偵測中...", UIState.YELLOW.value, UIState.YELLOW)
@@ -124,6 +126,12 @@ def main():
     while True:
         success, img = cap.read()
         if not success: break
+        img = cv2.flip(img, 1)  # 水平翻轉做鏡像效果
+
+        # 新增：計算即時 FPS（涵蓋 YOLO 偵測 + MediaPipe + 繪圖的完整單幀耗時）
+        curr_frame_time = time.time()
+        fps = 1 / (curr_frame_time - prev_frame_time) if (curr_frame_time - prev_frame_time) > 0 else 0
+        prev_frame_time = curr_frame_time
 
         # 1. 處理 AI 非同步回傳
         if not ai_pipeline.result_queue.empty():
@@ -171,7 +179,7 @@ def main():
                     feedback = FeedbackState("切換模式，準備開始... (請側對鏡頭)", UIState.RED.value, UIState.RED)
             
             # ====================================================================
-            # 💡 [重構威力展現] 統一呼叫，消滅所有 if-else 邏輯迷宮
+            # 統一呼叫動作邏輯
             # ====================================================================
             result = current_exercise.process_frame(lmList, ai_is_processing)
             
@@ -179,12 +187,12 @@ def main():
             
             # 對應 UI 顏色
             color_map = {
-                'RED': UIState.RED.value,
-                'YELLOW': UIState.YELLOW.value,
-                'GREEN': UIState.GREEN.value
+                'RED': UIState.RED,
+                'YELLOW': UIState.YELLOW,
+                'GREEN': UIState.GREEN
             }
-            ui_color = color_map.get(result['color'], UIState.RED.value)
-            feedback = FeedbackState(result['msg'], ui_color, ui_color)
+            ui_state = color_map.get(result['color'], UIState.RED)
+            feedback = FeedbackState(result['msg'], ui_state.value, ui_state)
 
             # 動態畫出錯誤部位的追蹤點 (用黃圈特別標示)
             if result.get('track_pts'):
@@ -202,7 +210,6 @@ def main():
             # ====================================================================
 
         # 3. 儀表板 UI 渲染
-        # (這裡若 pose 不存在，會直接使用預設或上一幀保留的 feedback 與 dashboard_info)
         mode_tw_display = {"SQUAT": "深蹲", "LUNGE": "弓箭步", "PLANK": "棒式"}.get(current_mode_name, "深蹲")
         img = put_chinese_text(img, f"[自動切換] {mode_tw_display}模式", (30, 40), (255, 165, 0), 35)
         cv2.circle(img, (50, 100), 20, feedback.color, cv2.FILLED)
@@ -217,7 +224,7 @@ def main():
             y_offset += 50
 
         # ----------------------------------------------------
-        # 動態寬度字幕模式 (解決溢出、方塊與顏色問題)
+        # 動態寬度字幕模式
         # ----------------------------------------------------
         if time.time() < ai_advice_expiry:
             font_size = 28
@@ -242,6 +249,9 @@ def main():
             for line in wrapped_lines:
                 img = put_chinese_text(img, line, (40, text_y), (255, 165, 0), font_size)
                 text_y += line_height
+
+        # 新增：右上角疊上 FPS（純數字用 cv2.putText 即可，不需動用 put_chinese_text 的 PIL 轉換）
+        cv2.putText(img, f"FPS: {fps:.1f}", (img.shape[1] - 220, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
         cv2.imshow("Smart Fitness Mirror", img)
         if cv2.waitKey(1) & 0xFF == ord("q"): break
